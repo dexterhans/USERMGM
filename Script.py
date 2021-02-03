@@ -1,81 +1,123 @@
-from datetime import datetime
-
+import getopt
+import sys
 import openpyxl as openpyxl
 from pymongo import MongoClient
-import re
-
-wb = openpyxl.load_workbook("/Users/deepakranganathan/Downloads/User Migration - User Management.xlsx")
-
-# sheets = wb.sheetnames
-# print(wb.active)
-# ws = wb[sheets[1]]
-# print(ws)
-# for n, sheet in enumerate(wb.worksheets):
-#     print('Sheet Index:[{}], Title:{}'.format(n, sheet.title))
-
-sheets = wb.sheetnames
-sheet = wb[sheets[6]]
-print(sheet)
-data = []
-for row in range(2, 10):
-    # val = sheet.cell(row, 4).value
-    print(sheet.cell(row,4).fill)
-    print()
-    print()
+import shelve
 
 
-stageConnectionStr = "mongodb://monger:9HT3X99ZN2gk3ad@services-mongo.infra-dev.joveo.com:27000/admin?connectTimeoutMS=10000&authSource=admin&authMechanism=SCRAM-SHA-1&3t.uriVersion=3&3t.databases=admin&3t.alwaysShowAuthDB=true&3t.alwaysShowDBFromUserRole=true"
-prodConnectionStr = "mongodb://readonly:872zU424C67TN2R@superprodmongo-0-pvt.infra.joveo.com:27017,superprodmongo-4-pvt.infra.joveo.com:27017,superprodmongo-5-pvt.infra.joveo.com:27017/admin?readPreference=secondary&connectTimeoutMS=10000&authSource=admin&authMechanism=SCRAM-SHA-1&3t.uriVersion=3&3t.connection.name=prod&3t.databases=admin&3t.alwaysShowAuthDB=true&3t.alwaysShowDBFromUserRole=true"
-
-client1 = MongoClient(prodConnectionStr)
-client2 = MongoClient(stageConnectionStr)
-
-mycollection = client1.mojo.joveo_users
-
-newcollection = client2.mojo.joveo_users_deepak_copy
-
-# Restore documents from the source collection.
-for a in mycollection.find(no_cursor_timeout=True):
+# providing commandline arguments to input connection string and excel sheet
+def main(argv):
+    global connectionStr
+    global excelSheet
     try:
-        newcollection.insert(a)
-        print(a)
-    except:
-        print('did not copy')
+        opts, args = getopt.getopt(argv, "hc:s:", ["connectionStr=", "sheet="])
+    except getopt.GetoptError:
+        print('test.py -c <connectionStr> -s <sheet>')
+        sys.exit(2)
+    for opt, arg in opts:
+        if opt == '-h':
+            print('test.py -c <connectionStr> -s <sheet>')
+            sys.exit()
+        elif opt in ("-c", "--connectionStr"):
+            connectionStr = arg
+        elif opt in ("-s", "--sheet"):
+            excelSheet = arg
+    print('connectionStr is ', connectionStr)
+    print('excelSheet is ', excelSheet)
 
 
-# for a in newcollection.find({"email":{ '$regex' : ".*hak.*"}}):
-#     print(a)
+connectionStr = ''
+excelSheet = ''
 
-# result = newcollection.find({"$and" : [{"scope": {"$size" : 1}},
-#                                        {"email":{ '$regex' : ".*hak.*"}}]})
-# print("new ")
-# for a in result:
-#     print(a['email'],end="    ")
-#     print(a['scope'])
+if __name__ == "__main__":
+    main(sys.argv[1:])
 
-# result = newcollection.find({"scope": {"$size" : 1}})
-#
-# for a in result:
-#     print(a['email'],end="    ")
-#     print(a['scope'])
+# stageConnectionStr = "mongodb://mms-automation:GNYbrmR99XkJHPtAEmxSFyCr@services-mongo.infra-dev.joveo.com:27000/admin?connectTimeoutMS=10000&authSource=admin&authMechanism=SCRAM-SHA-1"
 
-# //Use delete_one or delete_many instead
-# result = newcollection.remove({"$and" : [{"scope": {"$size" : 1}},
-#                                         {"email":{ '$regex' : ".*hak.*"}}]})
+client2 = MongoClient(connectionStr)
 
+# collection to work on
+collection = client2.mojo.joveo_users
 
-# newcollection.update({"email":{ '$regex' : ".*hak.*"}},
-#                      {"$pull": { "scope": {"application" : "Mojo"}}})
+d = shelve.open("persistent")
 
+if d.get("backup", 0) == 0:
+    d['backup'] = 1
+    collection.aggregate([{'$match': {}}, {'$out': "joveo_users_UM_backup"}])
+# sheet = "/Users/deepakranganathan/Downloads/User Migration - User Management-2.xlsx"
 
-# x = newcollection.find({ "$where": "this.scope.length > 2" })
-# for a in x:
-#     print(a)
-#
-#
-# newcollection.update({"email":{ '$regex' : ".*hak.*"}})
+wb = openpyxl.load_workbook(excelSheet)
 
-sample = ["abc","def","ghi"]
+# 1st usecase
+# remove mojo application form scope of the rows marked in grey,
+# and if the rows do not contain any other roles delete it
+sheets = wb.sheetnames
+sheet = wb[sheets[1]]
 
-newcollection.update({"email":{ '$regex' : ".*hak.*"}},
-                     {"$push":{"scope":{ "id": "ter","application" : "Mojo","clients":[],"publishers":[] } }})
+greyEmail = set()
+for row in range(2, sheet.max_row):
+    if sheet.cell(row, 4).fill.bgColor.rgb == "FFCCCCCC":
+        greyEmail.add(sheet.cell(row, 4).value)
+
+for val in greyEmail:
+    collection.update_one({"email": val},
+                          {"$pull": {"scope": {"application": "Mojo"}}})
+    print(val)
+
+# 2nd usecase
+# add agencies to the user email mentioned in the sheet
+sheet = wb[sheets[5]]
+
+for col in range(2, sheet.max_column):
+    if (collection.find_one({"email": sheet.cell(2, col).value}) != None):
+        for row in range(4, sheet.max_row):
+            if (sheet.cell(row, col).value != None):
+                collection.update_one({"email": sheet.cell(2, col).value},
+                                      {"$push": {"scope": {"id": sheet.cell(row, col).value, "application": "Mojo",
+                                                           "clients": [], "publishers": []}}})
+                collection.update_one({"email": sheet.cell(2, col).value}, {'$set': {
+                    "roles.0": sheet.cell(3, col).value}})
+            else:
+                break
+    else:
+        print("email {} is not available".format(sheet.cell(2, col).value))
+
+# print("deleting:")
+for val in greyEmail:
+    collection.delete_one({"$and": [{"scope": {"$size": 0}},
+                                    {"email": val}]})
+
+# 3rd usecase
+# obtaining old role and new role as key, value pair in a dict
+dict = {}
+sheetx = wb[sheets[9]]
+for row in range(2, sheetx.max_row):
+    if (sheetx.cell(row, 1).value != None):
+        dict.update({sheetx.cell(row, 1).value: sheetx.cell(row, 2).value})
+        print(sheetx.cell(row, 1).value)
+    else:
+        break
+
+print()
+print("updating roles")
+# updating the roles
+sheetx = wb[sheets[1]]
+print(sheetx)
+for row in range(2, sheetx.max_row):
+    if (sheetx.cell(row, 4).value != None):
+        print(sheetx.cell(row, 4).value)
+        print(sheetx.cell(row, 4).fill.bgColor.rgb)
+        cursor = collection.find_one({"email": sheetx.cell(row, 4).value})
+        if sheetx.cell(row, 4).fill.bgColor.rgb == "00000000" and cursor is not None and cursor['roles'] != []:
+            print(sheetx.cell(row, 4).value)
+            print(cursor['roles'])
+            print(cursor['roles'][0])
+            print("email is {} and roles is {}".format(sheetx.cell(row, 4).value, cursor['roles'][0]))
+            print()
+            print()
+            collection.update_one({"email": sheetx.cell(row, 4).value},
+                                  {'$set': {
+                                      "roles.0": dict.get(cursor['roles'][0], cursor['roles'][0])
+                                  }})
+    else:
+        break
